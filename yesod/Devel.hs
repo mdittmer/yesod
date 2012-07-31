@@ -5,6 +5,7 @@ module Devel
     ( devel
     ) where
 
+import Filesystem.Path.CurrentOS (encodeString, decodeString)
 
 import qualified Distribution.Simple.Utils as D
 import qualified Distribution.Verbosity as D
@@ -13,6 +14,7 @@ import qualified Distribution.PackageDescription as D
 import qualified Distribution.ModuleName as D
 
 import           Control.Concurrent (forkIO, threadDelay)
+import           Control.Concurrent.Chan (Chan, newChan, readChan)
 import qualified Control.Exception as Ex
 import           Control.Monad (forever, when, unless)
 
@@ -21,7 +23,7 @@ import qualified Data.List as L
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Time ()
-import           Data.Time.Clock (UTCTime)
+import           Data.Time.Clock (UTCTime, getCurrentTime)
 
 import           System.Directory
 import           System.Exit (exitFailure, exitSuccess, ExitCode (..))
@@ -88,7 +90,7 @@ devel isCabalDev passThroughArgs = do
 
        eventChan <- newChan
        watchManager <- startManager
-       map (\path -> watchTreeChan watchManager path (\_ -> True) eventChan) hsSourceDirs
+       _ <- mapM_ (\path -> watchTreeChan watchManager (decodeString path) (\_ -> True) eventChan) hsSourceDirs
 
        forever $ do
            putStrLn "Rebuilding application..."
@@ -104,7 +106,7 @@ devel isCabalDev passThroughArgs = do
                    putStrLn $ "Starting development server: runghc " ++ L.unwords devArgs
                    (_,_,_,ph) <- createProcess $ proc "runghc" devArgs
                    watchTid <- forkIO . try_ $ do
-                         waitForChanges buildTime eventChan
+                         waitForChanges buildStartTime eventChan
                          putStrLn "Stopping development server..."
                          writeLock
                          threadDelay 1000000
@@ -113,7 +115,7 @@ devel isCabalDev passThroughArgs = do
                    ec <- waitForProcess ph
                    putStrLn $ "Exit code: " ++ show ec
                    Ex.throwTo watchTid (userError "process finished")
-           waitForChanges buildTime eventChan
+           waitForChanges buildStartTime eventChan
 
 try_ :: forall a. IO a -> IO ()
 try_ x = (Ex.try x :: IO (Either Ex.SomeException a)) >> return ()
@@ -130,9 +132,9 @@ getFileList hsSourceDirs = do
             Left (_ :: Ex.SomeException) -> (f, 0)
             Right fs -> (f, modificationTime fs)
 
-waitForChanges :: UTCTime -> EventChannel -> IO ()
+waitForChanges :: UTCTime -> Chan Event -> IO ()
 waitForChanges buildStartTime eventChan = do
-    evtTime <- eventTime . return =<< readChan
+    evtTime <- return . eventTime =<< readChan eventChan
     if evtTime >= buildStartTime
       then return ()
       else waitForChanges buildStartTime eventChan
