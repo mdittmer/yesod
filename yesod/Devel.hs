@@ -20,6 +20,8 @@ import           Data.Char (isUpper, isNumber)
 import qualified Data.List as L
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import           Data.Time ()
+import           Data.Time.Clock (UTCTime)
 
 import           System.Directory
 import           System.Exit (exitFailure, exitSuccess, ExitCode (..))
@@ -29,6 +31,7 @@ import           System.PosixCompat.Files (modificationTime, getFileStatus)
 import           System.Process (createProcess, proc, terminateProcess, readProcess,
                                            waitForProcess, rawSystem, runInteractiveProcess)
 import           System.IO (hClose, hIsEOF, hGetLine, stdout, stderr, hPutStrLn)
+import           System.IO.FSNotify
 
 import Build (recompDeps, getDeps)
 
@@ -82,12 +85,16 @@ devel isCabalDev passThroughArgs = do
        when isCabalDev (rawSystemFilter cmd ["build"] >> return ())  -- cabal-dev fails with strange errors sometimes if we cabal-dev buildinfo before cabal-dev build
        pkgArgs <- ghcPackageArgs isCabalDev ghcVer
        let devArgs = pkgArgs ++ ["devel.hs"] ++ passThroughArgs
+
+       eventChan <- newChan
+       watchManager <- startManager
+       map (\path -> watchTreeChan watchManager path (\_ -> True) eventChan) hsSourceDirs
+
        forever $ do
            putStrLn "Rebuilding application..."
 
+           buildStartTime <- getCurrentTime
            recompDeps hsSourceDirs
-
-           list <- getFileList hsSourceDirs
            exit <- rawSystemFilter cmd ["build"]
 
            case exit of
@@ -97,7 +104,7 @@ devel isCabalDev passThroughArgs = do
                    putStrLn $ "Starting development server: runghc " ++ L.unwords devArgs
                    (_,_,_,ph) <- createProcess $ proc "runghc" devArgs
                    watchTid <- forkIO . try_ $ do
-                         watchForChanges hsSourceDirs list
+                         waitForChanges buildTime eventChan
                          putStrLn "Stopping development server..."
                          writeLock
                          threadDelay 1000000
@@ -106,7 +113,7 @@ devel isCabalDev passThroughArgs = do
                    ec <- waitForProcess ph
                    putStrLn $ "Exit code: " ++ show ec
                    Ex.throwTo watchTid (userError "process finished")
-           watchForChanges hsSourceDirs list
+           waitForChanges buildTime eventChan
 
 try_ :: forall a. IO a -> IO ()
 try_ x = (Ex.try x :: IO (Either Ex.SomeException a)) >> return ()
@@ -123,12 +130,12 @@ getFileList hsSourceDirs = do
             Left (_ :: Ex.SomeException) -> (f, 0)
             Right fs -> (f, modificationTime fs)
 
-watchForChanges :: [FilePath] ->  FileList -> IO ()
-watchForChanges hsSourceDirs list = do
-    newList <- getFileList hsSourceDirs
-    if list /= newList
+waitForChanges :: UTCTime -> EventChannel -> IO ()
+waitForChanges buildStartTime eventChan = do
+    evtTime <- eventTime . return =<< readChan
+    if evtTime >= buildStartTime
       then return ()
-      else threadDelay 1000000 >> watchForChanges hsSourceDirs list
+      else waitForChanges buildStartTime eventChan
 
 checkDevelFile :: IO ()
 checkDevelFile = do
