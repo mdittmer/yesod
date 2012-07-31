@@ -110,6 +110,7 @@ executable             yesod
                      , unordered-containers
                      , yaml               >= 0.8          && < 0.9
                      , fsnotify           >= 0.0.1
+                     , yesod-core         >= 1.0.1.0
     ghc-options:       -Wall -threaded
     main-is:           main.hs
     other-modules:     Scaffolding.CodeGen
